@@ -39,7 +39,7 @@ temperature, and thermal cycling that shortens bulb life.
 This integration instead holds the lamp at whatever steady percentage balances
 the enclosure's heat loss, and corrects around that.
 
-There is deliberately **no derivative term**. battery-powered wireless temperature sensors (Zigbee, Z-Wave, Bluetooth) quantise
+There is deliberately **no derivative term**. Battery-powered wireless temperature sensors (Zigbee, Z-Wave, Bluetooth) quantise
 to 0.1–0.5 °C and report every few minutes; a D term would differentiate a
 staircase and amplify noise far more than it would damp anything.
 
