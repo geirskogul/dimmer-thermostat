@@ -4,7 +4,7 @@ Control strategy
 ----------------
 A basking / infrared lamp on a dimmer is a proportional actuator, so this uses a
 PI controller rather than the on/off (bang-bang) control of HA's built-in Generic
-Thermostat. There is deliberately no derivative term: Zigbee temperature sensors
+Thermostat. There is deliberately no derivative term: wireless temperature sensors
 quantise to 0.1-0.5 degrees and report every few minutes, so a D term would
 amplify quantisation noise far more than it would damp anything.
 
@@ -13,8 +13,8 @@ Safety
 Every path through `async_control` either commands the dimmer or fails safe. The
 failsafe level is the configured minimum output (0 by default), because for a
 live animal an enclosure that is too cold is survivable for far longer than one
-that is too hot. This is still only a soft failsafe: it cannot help if the Zigbee
-mesh drops while the dimmer is holding a level. Keep an independent hardware
+that is too hot. This is still only a soft failsafe: it cannot help if the
+wireless link (Zigbee, Wi-Fi, ...) drops while the dimmer is holding a level. Keep an independent hardware
 over-temperature cutoff in the circuit.
 """
 

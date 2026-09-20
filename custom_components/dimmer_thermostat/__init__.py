@@ -1,7 +1,7 @@
 """The Dimmer Thermostat integration.
 
 Proportional (PI) temperature control of a heat source on a dimmer -- a reptile
-basking or infrared lamp on a Zigbee dimmer module, a heat mat on a dimmable
+basking or infrared lamp on a dimmer module (Zigbee, Wi-Fi, Z-Wave, ...), a heat mat on a dimmable
 outlet, or anything else whose output is meaningfully variable rather than
 on/off.
 """
