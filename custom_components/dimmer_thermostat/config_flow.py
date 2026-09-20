@@ -49,15 +49,16 @@ from .const import (
 
 def _number(minimum: float, maximum: float, step: float, unit: str | None = None):
     """A box-style number selector over the given range."""
-    return selector.NumberSelector(
-        selector.NumberSelectorConfig(
-            min=minimum,
-            max=maximum,
-            step=step,
-            mode=selector.NumberSelectorMode.BOX,
-            unit_of_measurement=unit,
-        )
+    config = selector.NumberSelectorConfig(
+        min=minimum,
+        max=maximum,
+        step=step,
+        mode=selector.NumberSelectorMode.BOX,
     )
+    # Home Assistant rejects unit_of_measurement=None, so only set it when there is a unit.
+    if unit is not None:
+        config["unit_of_measurement"] = unit
+    return selector.NumberSelector(config)
 
 
 def _entity(domain: str | list[str], device_class: str | None = None):
