@@ -1,0 +1,12 @@
+{
+  "domain": "dimmer_thermostat",
+  "name": "Dimmer Thermostat",
+  "codeowners": ["@geirskogul"],
+  "config_flow": true,
+  "documentation": "https://github.com/geirskogul/dimmer-thermostat",
+  "integration_type": "device",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/geirskogul/dimmer-thermostat/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

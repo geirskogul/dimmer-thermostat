@@ -1,0 +1,122 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Dimmer Thermostat",
+        "description": "Proportional temperature control of a heat source on a dimmer. Pick the sensor that measures the space and the dimmer that drives the lamp; everything else can be tuned afterwards.",
+        "data": {
+          "name": "Name",
+          "temperature_sensor": "Temperature sensor",
+          "dimmer_entity": "Dimmer",
+          "target_temp": "Target temperature",
+          "max_output": "Maximum output"
+        },
+        "data_description": {
+          "temperature_sensor": "Must report often enough to control on. Configure the device to report every few minutes at most.",
+          "dimmer_entity": "A dimmable light, or a number entity that sets a level from 0 to 100.",
+          "max_output": "The controller will never command more than this. Measure the actual surface temperature at full output before raising it."
+        }
+      },
+      "reconfigure": {
+        "title": "Change sensor or dimmer",
+        "description": "Point this thermostat at different entities. Tuning is unaffected.",
+        "data": {
+          "name": "Name",
+          "temperature_sensor": "Temperature sensor",
+          "dimmer_entity": "Dimmer",
+          "target_temp": "Target temperature",
+          "max_output": "Maximum output"
+        }
+      }
+    },
+    "error": {
+      "not_dimmable": "That light does not report a brightness capability, so it cannot be driven proportionally.",
+      "unsupported_dimmer": "Pick a light, number or input_number entity."
+    },
+    "abort": {
+      "already_configured": "That dimmer is already driven by another thermostat.",
+      "unique_id_mismatch": "That dimmer belongs to a different thermostat.",
+      "reconfigure_successful": "Updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tuning",
+        "menu_options": {
+          "regulation": "Regulation",
+          "limits": "Output and setpoint limits",
+          "safety": "Safety"
+        }
+      },
+      "regulation": {
+        "title": "Regulation",
+        "description": "Find the output that holds your target by hand first. Then set the gain with integral time very long, and shorten integral time until the residual offset closes without overshoot.",
+        "data": {
+          "kp": "Proportional gain",
+          "ti_minutes": "Integral time",
+          "cycle_seconds": "Control interval",
+          "startup_output": "Startup output",
+          "send_deadband": "Send deadband",
+          "resend_seconds": "Keep-alive interval"
+        },
+        "data_description": {
+          "kp": "Percent of output per degree of error.",
+          "ti_minutes": "Longer is gentler. Shorten it only until the steady offset closes.",
+          "cycle_seconds": "How often the loop runs regardless of sensor reports.",
+          "startup_output": "Where the integral starts, before any history exists.",
+          "send_deadband": "Changes smaller than this are not sent, to spare the radio.",
+          "resend_seconds": "The current level is re-sent at least this often."
+        }
+      },
+      "limits": {
+        "title": "Output and setpoint limits",
+        "data": {
+          "min_output": "Minimum output",
+          "max_output": "Maximum output",
+          "min_temp": "Lowest selectable setpoint",
+          "max_temp": "Highest selectable setpoint",
+          "precision": "Setpoint step"
+        },
+        "data_description": {
+          "min_output": "Also the level the thermostat falls back to when anything goes wrong."
+        }
+      },
+      "safety": {
+        "title": "Safety",
+        "description": "These are soft guards only. They cannot help if the radio link drops while the dimmer is holding a level, so keep an independent hardware over-temperature cutoff in the circuit.",
+        "data": {
+          "overtemp_margin": "Over-temperature margin",
+          "sensor_max_age": "Sensor staleness timeout",
+          "temp_min_valid": "Lowest plausible reading",
+          "temp_max_valid": "Highest plausible reading",
+          "saturation_alert_seconds": "Saturation alert delay"
+        },
+        "data_description": {
+          "overtemp_margin": "Above setpoint plus this, the dimmer is cut outright.",
+          "sensor_max_age": "Longer than this without a report counts as a sensor failure. Must be longer than the sensor's own reporting interval.",
+          "saturation_alert_seconds": "How long the dimmer may sit at maximum while still too cold before you are warned about the bulb."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "output": { "name": "Output" },
+      "integral": { "name": "PI integral" },
+      "status": { "name": "Controller status" }
+    }
+  },
+  "services": {
+    "reset_integral": {
+      "name": "Reset integral",
+      "description": "Clear the accumulated integral term, optionally preloading it. Use this after changing the bulb, the fixture or the enclosure.",
+      "fields": {
+        "preload": {
+          "name": "Preload",
+          "description": "Output percentage to start the integral from. Defaults to the configured startup output."
+        }
+      }
+    }
+  }
+}
