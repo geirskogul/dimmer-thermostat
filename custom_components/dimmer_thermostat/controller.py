@@ -41,6 +41,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
@@ -66,10 +67,16 @@ from .const import (
     CONF_TEMP_MAX_VALID,
     CONF_TEMP_MIN_VALID,
     CONF_TI_MINUTES,
+    CONF_QUIET_SENSORS,
     DEFAULTS,
+    HEARTBEAT_SECONDS,
     LIGHT_DOMAIN,
     NOTIFY_THROTTLE_SECONDS,
     NUMBER_DOMAINS,
+    QUIET_AUTO,
+    QUIET_HEARTBEAT,
+    QUIET_TIMEOUT,
+    QUIET_TRUST,
     STATUS_DEGRADED,
     STATUS_FAILSAFE,
     STATUS_OFF,
@@ -417,14 +424,19 @@ class DimmerThermostatController:
                 None, f"{entity_id} reported the non-numeric value {state.state!r}"
             )
 
-        age = _state_age_seconds(state)
-        max_age = self._opt(CONF_SENSOR_MAX_AGE)
-        if age is not None and age > max_age:
-            return _Reading(
-                None,
-                f"{entity_id} last reported {int(age)} s ago, "
-                f"over the {int(max_age)} s limit",
-            )
+        # A trusted sensor fails only when its integration marks it unavailable.
+        mode = self._quiet_mode(entity_id)
+        if mode != QUIET_TRUST:
+            age = self._seconds_since_heard(entity_id, state)
+            max_age = self._opt(CONF_SENSOR_MAX_AGE)
+            if mode == QUIET_HEARTBEAT:
+                max_age = max(max_age, HEARTBEAT_SECONDS)
+            if age is not None and age > max_age:
+                return _Reading(
+                    None,
+                    f"{entity_id} and its device last reported {int(age)} s ago, "
+                    f"over the {int(max_age)} s limit",
+                )
 
         low = self._opt(CONF_TEMP_MIN_VALID)
         high = self._opt(CONF_TEMP_MAX_VALID)
@@ -437,6 +449,40 @@ class DimmerThermostatController:
             )
 
         return _Reading(temperature)
+
+    def _quiet_mode(self, entity_id: str) -> str:
+        """How a quiet spell from this sensor is judged, resolving "auto"."""
+        mode = self.entry.options.get(CONF_QUIET_SENSORS, DEFAULTS[CONF_QUIET_SENSORS])
+        if mode != QUIET_AUTO:
+            return mode
+        entry = er.async_get(self.hass).async_get(entity_id)
+        if entry is None:
+            return QUIET_TIMEOUT
+        if entry.platform == "zha":
+            return QUIET_TRUST
+        if entry.platform == "mqtt" and "zigbee2mqtt" in (entry.unique_id or ""):
+            return QUIET_HEARTBEAT
+        return QUIET_TIMEOUT
+
+    def _seconds_since_heard(self, entity_id: str, state: State) -> float | None:
+        """Seconds since the sensor's device last reported anything at all.
+
+        A sensor that only reports on change goes quiet while the temperature
+        is steady. If the same device has reported anything else since (battery,
+        humidity, signal strength), it is evidently alive and its last
+        temperature still stands.
+        """
+        ages = [_state_age_seconds(state)]
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(entity_id)
+        if entry is not None and entry.device_id is not None:
+            for sibling in er.async_entries_for_device(registry, entry.device_id):
+                sibling_state = self.hass.states.get(sibling.entity_id)
+                if sibling_state is None or sibling_state.state in _INVALID_STATES:
+                    continue
+                ages.append(_state_age_seconds(sibling_state))
+        known = [age for age in ages if age is not None]
+        return min(known) if known else None
 
     async def _async_fail_safe(self, reason: str) -> None:
         """Park the dimmer, reset the integral and raise a notification."""

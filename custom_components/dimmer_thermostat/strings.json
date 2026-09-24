@@ -95,6 +95,7 @@
         "description": "These are soft guards only. They cannot help if the radio link drops while the dimmer is holding a level, so keep an independent hardware over-temperature cutoff in the circuit.",
         "data": {
           "overtemp_margin": "Over-temperature margin",
+          "quiet_sensor_handling": "Quiet sensors",
           "sensor_max_age": "Sensor staleness timeout",
           "temp_min_valid": "Lowest plausible reading",
           "temp_max_valid": "Highest plausible reading",
@@ -102,7 +103,8 @@
         },
         "data_description": {
           "overtemp_margin": "Above setpoint plus this, the dimmer is cut outright.",
-          "sensor_max_age": "Longer than this without a report counts as a sensor failure. Must be longer than the sensor's own reporting interval.",
+          "quiet_sensor_handling": "What to do when a sensor stops reporting, for sensors that only report when the temperature changes. Automatic picks per sensor: ZHA sensors are trusted until ZHA marks them unavailable, Zigbee2MQTT sensors until their device misses its heartbeat, and anything else uses the staleness timeout.",
+          "sensor_max_age": "Longer than this without any report from the sensor's device (temperature, battery, humidity, signal) counts as a sensor failure.",
           "saturation_alert_seconds": "How long the dimmer may sit at maximum while still too cold before you are warned about the bulb."
         }
       }
@@ -124,6 +126,16 @@
           "name": "Preload",
           "description": "Output percentage to start the integral from. Defaults to the configured startup output."
         }
+      }
+    }
+  },
+  "selector": {
+    "quiet_sensor_handling": {
+      "options": {
+        "timeout": "Staleness timeout (below)",
+        "auto": "Automatic, by integration",
+        "trust": "Trust until unavailable (ZHA)",
+        "heartbeat": "Device heartbeat within 2 hours (legacy Zigbee2MQTT)"
       }
     }
   }

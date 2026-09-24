@@ -1,3 +1,5 @@
+<img src="custom_components/dimmer_thermostat/brand/icon.png" alt="" width="96" align="right">
+
 # Dimmer Thermostat
 
 Proportional (PI) temperature control of a heat source on a dimmer, as a Home
@@ -122,7 +124,8 @@ error after a 6 °C drop in ambient. Your enclosure is not that model — tune i
 The integration's own guards are **soft** ones:
 
 - Sensor unavailable, non-numeric, stale or implausible → output drops to the
-  configured minimum, with a notification. With a backup sensor, this happens
+  configured minimum, with a notification (how "stale" is judged depends
+  on the *Quiet sensors* setting). With a backup sensor, this happens
   only when both have failed or either reads implausibly high.
 - Measured temperature (the higher of the two sensors, with a backup) above
   setpoint + margin → dimmer cut outright.
@@ -152,6 +155,39 @@ reporting to roughly min 30 s / max 300 s / change 10 (0.1 °C); in ZHA use
 `zha-toolkit` or the cluster config page. Keep *Sensor staleness timeout*
 comfortably longer than that max interval, or the failsafe will nuisance-trip
 when the temperature is genuinely steady.
+
+The staleness timeout counts a report from **any entity on the sensor's
+device** (battery, humidity, signal strength) as a sign of life, so a sensor
+whose temperature is steady but whose device still reports something else
+keeps its last reading.
+
+**Sensors you cannot reconfigure.** Some sensors only report on change and
+cannot be told otherwise. Set *Quiet sensors* (Configure → Safety) to one of:
+
+| Setting | A quiet sensor counts as failed when… | Use for |
+| --- | --- | --- |
+| Staleness timeout (default) | its device has reported nothing for the *Sensor staleness timeout* | sensors that report regularly |
+| Trust until unavailable | its integration marks it unavailable | ZHA |
+| Device heartbeat within 2 hours | its device has reported nothing for 2 hours (or the staleness timeout, if longer), or it is unavailable | legacy Zigbee2MQTT sensors |
+| **Automatic, by integration** | ZHA sensors: trust; Zigbee2MQTT sensors: heartbeat; anything else: timeout | mixed setups; the quick choice |
+
+- **ZHA** marks battery devices unavailable after 6 hours of silence by default
+  (Settings → Devices & services → Zigbee Home Automation → Configure →
+  *Consider battery powered devices unavailable after*). Mains-powered devices:
+  2 hours.
+- **Zigbee2MQTT** only marks devices unavailable with its *availability* feature
+  on, which is off by default, so trusting a Z2M sensor indefinitely is unsafe.
+  Legacy sensors (Xiaomi/Aqara and similar) do send a heartbeat roughly every
+  50–60 minutes, which is what the heartbeat setting relies on. Home Assistant
+  does not record an MQTT message that repeats the same temperature, so give the
+  device another entity that changes with every message: turn on *Last seen*
+  in Zigbee2MQTT (Settings → Advanced → Last seen: ISO_8601) and enable the
+  device's `last_seen` entity in Home Assistant. Link quality, battery and
+  voltage count too.
+
+While a sensor is quiet its last reading is held. A backup sensor makes that
+much safer: the higher reading wins, so if one sensor dies the live one still
+trips the over-temperature cut.
 
 **Where the probe is.** An air sensor near the lamp measures air, not the
 basking surface, which under an IR bulb can be 15–20 °C hotter than air 10 cm

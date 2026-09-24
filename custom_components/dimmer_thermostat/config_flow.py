@@ -38,9 +38,11 @@ from .const import (
     CONF_TEMP_MIN_VALID,
     CONF_TEMP_UNIT,
     CONF_TI_MINUTES,
+    CONF_QUIET_SENSORS,
     DEFAULTS,
     DOMAIN,
     LIGHT_DOMAIN,
+    QUIET_MODES,
     SUPPORTED_DIMMER_DOMAINS,
 )
 
@@ -106,6 +108,16 @@ LIMITS_KEYS = (
 
 SAFETY_KEYS = (
     (CONF_OVERTEMP_MARGIN, _number(0.1, 20, 0.1)),
+    (
+        CONF_QUIET_SENSORS,
+        selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=list(QUIET_MODES),
+                mode=selector.SelectSelectorMode.DROPDOWN,
+                translation_key=CONF_QUIET_SENSORS,
+            )
+        ),
+    ),
     (CONF_SENSOR_MAX_AGE, _number(60, 21600, 60, "s")),
     (CONF_TEMP_MIN_VALID, _number(-50, 200, 0.5)),
     (CONF_TEMP_MAX_VALID, _number(-50, 200, 0.5)),
@@ -301,7 +313,12 @@ class DimmerThermostatOptionsFlow(OptionsFlow):
             )
 
         options = dict(self.config_entry.options)
-        options.update({key: float(value) for key, value in user_input.items()})
+        options.update(
+            {
+                key: value if isinstance(value, str) else float(value)
+                for key, value in user_input.items()
+            }
+        )
         return self.async_create_entry(data=options)
 
     def _build_schema(self, keys: tuple[tuple[str, Any], ...]) -> vol.Schema:
@@ -311,11 +328,13 @@ class DimmerThermostatOptionsFlow(OptionsFlow):
             fields[vol.Required(key, default=self._current(key))] = field_selector
         return vol.Schema(fields)
 
-    def _current(self, key: str) -> float:
+    def _current(self, key: str) -> float | str:
         """The value in force for a tunable right now."""
         entry = self.config_entry
         if key in entry.options:
-            return float(entry.options[key])
-        if key in entry.data:
-            return float(entry.data[key])
-        return float(DEFAULTS[key])
+            value = entry.options[key]
+        elif key in entry.data:
+            value = entry.data[key]
+        else:
+            value = DEFAULTS[key]
+        return value if isinstance(value, str) else float(value)

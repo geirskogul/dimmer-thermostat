@@ -38,6 +38,7 @@ CONF_PRECISION: Final = "precision"
 
 CONF_OVERTEMP_MARGIN: Final = "overtemp_margin"
 CONF_SENSOR_MAX_AGE: Final = "sensor_max_age"
+CONF_QUIET_SENSORS: Final = "quiet_sensor_handling"
 CONF_TEMP_MIN_VALID: Final = "temp_min_valid"
 CONF_TEMP_MAX_VALID: Final = "temp_max_valid"
 CONF_SATURATION_ALERT: Final = "saturation_alert_seconds"
@@ -48,7 +49,7 @@ CONF_SATURATION_ALERT: Final = "saturation_alert_seconds"
 # the source sensor reports. TI is the classic integral time: the integral term
 # contributes KP / TI per degree-minute of accumulated error.
 
-DEFAULTS: Final[dict[str, float | int]] = {
+DEFAULTS: Final[dict[str, float | int | str]] = {
     CONF_KP: 12.0,
     CONF_TI_MINUTES: 30.0,
     CONF_CYCLE_SECONDS: 60,
@@ -63,10 +64,24 @@ DEFAULTS: Final[dict[str, float | int]] = {
     CONF_PRECISION: 0.5,
     CONF_OVERTEMP_MARGIN: 1.5,
     CONF_SENSOR_MAX_AGE: 1200,
+    CONF_QUIET_SENSORS: "timeout",
     CONF_TEMP_MIN_VALID: 5.0,
     CONF_TEMP_MAX_VALID: 55.0,
     CONF_SATURATION_ALERT: 1800,
 }
+
+# How a sensor that has stopped reporting is judged. "timeout" applies the
+# staleness timeout; "trust" holds the last reading until the sensor goes
+# unavailable (ZHA does this reliably); "heartbeat" waits for the whole device to
+# miss its heartbeat (legacy Zigbee2MQTT sensors check in about hourly but never
+# go unavailable unless Z2M availability is on); "auto" picks per sensor from the
+# integration that provides it.
+QUIET_TIMEOUT: Final = "timeout"
+QUIET_TRUST: Final = "trust"
+QUIET_HEARTBEAT: Final = "heartbeat"
+QUIET_AUTO: Final = "auto"
+QUIET_MODES: Final = (QUIET_TIMEOUT, QUIET_AUTO, QUIET_TRUST, QUIET_HEARTBEAT)
+HEARTBEAT_SECONDS: Final = 7200
 
 # Domains accepted as the dimmer. `light` is driven with brightness_pct; the
 # number domains are driven with set_value scaled across their own min/max.
