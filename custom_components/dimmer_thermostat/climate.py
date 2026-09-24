@@ -22,6 +22,7 @@ from .const import (
     ATTR_OUTPUT,
     ATTR_STATUS,
     ATTR_STATUS_DETAIL,
+    ATTR_TEMPERATURE_SOURCE,
     CONF_MAX_TEMP,
     CONF_MIN_TEMP,
     CONF_PRECISION,
@@ -90,7 +91,7 @@ class DimmerThermostat(DimmerThermostatEntity, ClimateEntity, RestoreEntity):
 
     @property
     def current_temperature(self) -> float | None:
-        """The last trustworthy reading from the source sensor."""
+        """The last trustworthy reading, the higher of the two with a backup."""
         return self._controller.current_temperature
 
     @property
@@ -104,7 +105,7 @@ class DimmerThermostat(DimmerThermostatEntity, ClimateEntity, RestoreEntity):
         return self._controller.current_temperature is not None
 
     @property
-    def extra_state_attributes(self) -> dict[str, float | str]:
+    def extra_state_attributes(self) -> dict[str, float | str | None]:
         """Expose the controller internals, which also makes them restorable."""
         controller = self._controller
         return {
@@ -112,6 +113,7 @@ class DimmerThermostat(DimmerThermostatEntity, ClimateEntity, RestoreEntity):
             ATTR_OUTPUT: round(controller.output, 1),
             ATTR_STATUS: controller.status,
             ATTR_STATUS_DETAIL: controller.status_detail,
+            ATTR_TEMPERATURE_SOURCE: controller.temperature_source,
         }
 
     # -- commands -------------------------------------------------------------

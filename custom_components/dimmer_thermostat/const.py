@@ -15,6 +15,7 @@ MODEL: Final = "PI proportional heater"
 # --- Config entry data keys (set at creation, changed via reconfigure) ---------
 
 CONF_SENSOR: Final = "temperature_sensor"
+CONF_BACKUP_SENSOR: Final = "backup_temperature_sensor"
 CONF_DIMMER: Final = "dimmer_entity"
 CONF_TEMP_UNIT: Final = "temperature_unit"
 
@@ -75,6 +76,7 @@ SUPPORTED_DIMMER_DOMAINS: Final = (LIGHT_DOMAIN, *NUMBER_DOMAINS)
 
 # Status strings published by the controller.
 STATUS_OK: Final = "ok"
+STATUS_DEGRADED: Final = "degraded"
 STATUS_OFF: Final = "off"
 STATUS_OVERTEMP: Final = "overtemp"
 STATUS_FAILSAFE: Final = "failsafe"
@@ -84,5 +86,6 @@ ATTR_INTEGRAL: Final = "pi_integral"
 ATTR_OUTPUT: Final = "output_percent"
 ATTR_STATUS: Final = "controller_status"
 ATTR_STATUS_DETAIL: Final = "controller_status_detail"
+ATTR_TEMPERATURE_SOURCE: Final = "temperature_source"
 
 NOTIFY_THROTTLE_SECONDS: Final = 1800

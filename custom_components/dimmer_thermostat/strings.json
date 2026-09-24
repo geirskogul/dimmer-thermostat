@@ -7,6 +7,7 @@
         "data": {
           "name": "Name",
           "temperature_sensor": "Temperature sensor",
+          "backup_temperature_sensor": "Backup temperature sensor (optional)",
           "dimmer_entity": "Dimmer",
           "target_temp": "Target temperature",
           "max_output": "Maximum output"
@@ -14,24 +15,31 @@
         "data_description": {
           "temperature_sensor": "Must report often enough to control on. Configure the device to report every few minutes at most.",
           "dimmer_entity": "A dimmable light, or a number entity that sets a level from 0 to 100.",
-          "max_output": "The controller will never command more than this. Measure the actual surface temperature at full output before raising it."
+          "max_output": "The controller will never command more than this. Measure the actual surface temperature at full output before raising it.",
+          "backup_temperature_sensor": "A second sensor in the same space. The thermostat controls on whichever sensor reads higher, either one can trip the over-temperature cut, and if one fails the other carries on."
         }
       },
       "reconfigure": {
-        "title": "Change sensor or dimmer",
+        "title": "Change sensors or dimmer",
         "description": "Point this thermostat at different entities. Tuning is unaffected.",
         "data": {
           "name": "Name",
           "temperature_sensor": "Temperature sensor",
+          "backup_temperature_sensor": "Backup temperature sensor (optional)",
           "dimmer_entity": "Dimmer",
           "target_temp": "Target temperature",
           "max_output": "Maximum output"
+        },
+        "data_description": {
+          "backup_temperature_sensor": "A second sensor in the same space. The thermostat controls on whichever sensor reads higher, either one can trip the over-temperature cut, and if one fails the other carries on."
         }
       }
     },
     "error": {
       "not_dimmable": "That light does not report a brightness capability, so it cannot be driven proportionally.",
-      "unsupported_dimmer": "Pick a light, number or input_number entity."
+      "unsupported_dimmer": "Pick a light, number or input_number entity.",
+      "same_sensor": "The backup must be a different sensor from the primary.",
+      "unit_mismatch": "The backup sensor reports in a different unit from the primary sensor."
     },
     "abort": {
       "already_configured": "That dimmer is already driven by another thermostat.",

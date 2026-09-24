@@ -25,6 +25,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from homeassistant.components.climate import HVACAction, HVACMode
 from homeassistant.components.light import ATTR_BRIGHTNESS_PCT
@@ -48,6 +49,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_INTEGRAL,
+    CONF_BACKUP_SENSOR,
     CONF_CYCLE_SECONDS,
     CONF_DIMMER,
     CONF_KP,
@@ -68,6 +70,7 @@ from .const import (
     LIGHT_DOMAIN,
     NOTIFY_THROTTLE_SECONDS,
     NUMBER_DOMAINS,
+    STATUS_DEGRADED,
     STATUS_FAILSAFE,
     STATUS_OFF,
     STATUS_OK,
@@ -85,6 +88,14 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+class _Reading(NamedTuple):
+    """One sensor's reading, or the reason it cannot be trusted."""
+
+    value: float | None
+    problem: str | None = None
+    too_hot: bool = False
+
+
 class DimmerThermostatController:
     """Owns the control loop, the actuator and the published controller state."""
 
@@ -96,6 +107,7 @@ class DimmerThermostatController:
         self.hvac_mode: HVACMode = HVACMode.OFF
         self.target_temperature: float = self._opt(CONF_TARGET_TEMP)
         self.current_temperature: float | None = None
+        self.temperature_source: str | None = None
         self.output: float = 0.0
         self.integral: float = self._opt(CONF_STARTUP_OUTPUT)
         self.status: str = STATUS_STARTING
@@ -110,7 +122,8 @@ class DimmerThermostatController:
         self._last_send_monotonic: float | None = None
         self._last_sent_output: float | None = None
         self._saturated_since: float | None = None
-        self._last_notify_monotonic: float | None = None
+        self._last_notify_monotonic: dict[str, float] = {}
+        self._sensor_problems: list[str] = []
 
     # -- configuration access -------------------------------------------------
 
@@ -123,9 +136,13 @@ class DimmerThermostatController:
         return float(DEFAULTS[key])
 
     @property
-    def sensor_entity_id(self) -> str:
-        """Entity id of the temperature sensor driving the loop."""
-        return self.entry.data[CONF_SENSOR]
+    def sensor_entity_ids(self) -> list[str]:
+        """The primary temperature sensor, then the backup if one is set."""
+        sensors = [self.entry.data[CONF_SENSOR]]
+        backup = self.entry.data.get(CONF_BACKUP_SENSOR)
+        if backup and backup not in sensors:
+            sensors.append(backup)
+        return sensors
 
     @property
     def dimmer_entity_id(self) -> str:
@@ -180,7 +197,7 @@ class DimmerThermostatController:
         )
         self._unsubscribers.append(
             async_track_state_change_event(
-                self.hass, [self.sensor_entity_id], self._async_sensor_event
+                self.hass, self.sensor_entity_ids, self._async_sensor_event
             )
         )
         await self.async_control()
@@ -205,7 +222,7 @@ class DimmerThermostatController:
         await self.async_control()
 
     async def _async_sensor_event(self, event: Event[EventStateChangedData]) -> None:
-        """React immediately to a fresh sensor report."""
+        """React immediately to a fresh report from either sensor."""
         await self.async_control()
 
     # -- commands from the climate entity -------------------------------------
@@ -261,18 +278,23 @@ class DimmerThermostatController:
         await self._async_regulate(temperature)
 
     def _read_temperature_quietly(self) -> None:
-        """Track the sensor while switched off, without guards or failsafes.
+        """Track the sensors while switched off, without guards or failsafes.
 
         A thermostat that is off should still show the room temperature, and
         should still be available so the user can switch it back on.
         """
-        state = self.hass.states.get(self.sensor_entity_id)
-        if state is None or state.state in _INVALID_STATES:
-            return
-        try:
-            self.current_temperature = float(state.state)
-        except (TypeError, ValueError):
-            pass
+        readings: dict[str, float] = {}
+        for entity_id in self.sensor_entity_ids:
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state in _INVALID_STATES:
+                continue
+            try:
+                readings[entity_id] = float(state.state)
+            except (TypeError, ValueError):
+                continue
+        if readings:
+            self.temperature_source = max(readings, key=readings.__getitem__)
+            self.current_temperature = readings[self.temperature_source]
 
     async def _async_regulate(self, temperature: float) -> None:
         """Normal operation: over-temperature check, then one PI step."""
@@ -284,11 +306,17 @@ class DimmerThermostatController:
         output = self._compute_output(temperature, self._step_interval())
         await self._async_drive_dimmer(output)
         self._track_saturation(output, self.target_temperature - temperature)
-        self._set_status(
-            STATUS_OK,
-            f"temp={temperature:.2f} target={self.target_temperature:.2f} "
-            f"out={output:.1f}% i={self.integral:.1f}%",
+        detail = (
+            f"temp={temperature:.2f} ({self.temperature_source}) "
+            f"target={self.target_temperature:.2f} "
+            f"out={output:.1f}% i={self.integral:.1f}%"
         )
+        if self._sensor_problems:
+            self._set_status(
+                STATUS_DEGRADED, f"{detail}; {'; '.join(self._sensor_problems)}"
+            )
+            return
+        self._set_status(STATUS_OK, detail)
 
     def _compute_output(self, temperature: float, dt_seconds: float) -> float:
         """Advance the integral and return the commanded output percentage.
@@ -340,50 +368,82 @@ class DimmerThermostatController:
     # -- validation and failure paths -----------------------------------------
 
     async def _async_validated_temperature(self) -> float | None:
-        """Return a trustworthy reading, or None having already failed safe."""
-        state = self.hass.states.get(self.sensor_entity_id)
-        if state is None or state.state in _INVALID_STATES:
-            await self._async_fail_safe(f"{self.sensor_entity_id} is unavailable")
+        """Return the hottest trustworthy reading, or None having failed safe.
+
+        With a backup sensor the loop controls on whichever valid sensor reads
+        higher, so either one can trip the over-temperature cut. A sensor that is
+        unavailable, stale or implausibly low is dropped with a warning while
+        the other carries on. A reading above the plausible range is never
+        dropped: it may be a real overheat rather than a broken probe, so it
+        fails safe exactly as a lone sensor would.
+        """
+        readings: dict[str, float] = {}
+        problems: list[str] = []
+        for entity_id in self.sensor_entity_ids:
+            reading = self._read_sensor(entity_id)
+            if reading.too_hot:
+                await self._async_fail_safe(reading.problem)
+                return None
+            if reading.value is None:
+                problems.append(reading.problem)
+            else:
+                readings[entity_id] = reading.value
+
+        self._sensor_problems = problems if readings else []
+        if not readings:
+            await self._async_fail_safe("; ".join(problems))
             return None
+
+        self.temperature_source = max(readings, key=readings.__getitem__)
+        if problems:
+            reason = "; ".join(problems)
+            self._notify(
+                "sensor",
+                f"Running on {self.temperature_source} alone -- {reason}",
+            )
+            _LOGGER.warning("%s: sensor degraded, %s", self.entry.title, reason)
+        return readings[self.temperature_source]
+
+    def _read_sensor(self, entity_id: str) -> _Reading:
+        """Apply the availability, staleness and plausibility guards to one sensor."""
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in _INVALID_STATES:
+            return _Reading(None, f"{entity_id} is unavailable")
 
         try:
             temperature = float(state.state)
         except (TypeError, ValueError):
-            await self._async_fail_safe(
-                f"{self.sensor_entity_id} reported the non-numeric value {state.state!r}"
+            return _Reading(
+                None, f"{entity_id} reported the non-numeric value {state.state!r}"
             )
-            return None
 
-        return await self._async_check_reading(temperature, state)
-
-    async def _async_check_reading(self, temperature: float, state: State) -> float | None:
-        """Apply the staleness and plausibility guards to a numeric reading."""
         age = _state_age_seconds(state)
         max_age = self._opt(CONF_SENSOR_MAX_AGE)
         if age is not None and age > max_age:
-            await self._async_fail_safe(
-                f"{self.sensor_entity_id} last reported {int(age)} s ago, "
-                f"over the {int(max_age)} s limit"
+            return _Reading(
+                None,
+                f"{entity_id} last reported {int(age)} s ago, "
+                f"over the {int(max_age)} s limit",
             )
-            return None
 
         low = self._opt(CONF_TEMP_MIN_VALID)
         high = self._opt(CONF_TEMP_MAX_VALID)
         if not low <= temperature <= high:
-            await self._async_fail_safe(
-                f"{self.sensor_entity_id} reads {temperature}, outside the "
-                f"plausible range {low} to {high}"
+            return _Reading(
+                None,
+                f"{entity_id} reads {temperature}, outside the "
+                f"plausible range {low} to {high}",
+                too_hot=temperature > high,
             )
-            return None
 
-        return temperature
+        return _Reading(temperature)
 
     async def _async_fail_safe(self, reason: str) -> None:
         """Park the dimmer, reset the integral and raise a notification."""
         await self._async_drive_dimmer(self.min_output, force=True)
         self.integral = self._opt(CONF_STARTUP_OUTPUT)
         self._set_status(STATUS_FAILSAFE, reason)
-        self._notify(f"Heating dropped to {self.min_output:.0f}% -- {reason}")
+        self._notify("failsafe", f"Heating dropped to {self.min_output:.0f}% -- {reason}")
         _LOGGER.warning("%s: failsafe, %s", self.entry.title, reason)
 
     async def _async_shutdown(self, reason: str) -> None:
@@ -397,11 +457,14 @@ class DimmerThermostatController:
         await self._async_drive_dimmer(self.min_output, force=True)
         self._set_status(
             STATUS_OVERTEMP,
-            f"temp={temperature:.2f} target={self.target_temperature:.2f}",
+            f"temp={temperature:.2f} ({self.temperature_source}) "
+            f"target={self.target_temperature:.2f}",
         )
         self._notify(
-            f"Over temperature: {temperature:.1f} against a setpoint of "
-            f"{self.target_temperature:.1f}. The dimmer has been cut."
+            "overtemp",
+            f"Over temperature: {self.temperature_source} reads {temperature:.1f} "
+            f"against a setpoint of {self.target_temperature:.1f}. "
+            "The dimmer has been cut.",
         )
 
     def _track_saturation(self, output: float, error: float) -> None:
@@ -420,6 +483,7 @@ class DimmerThermostatController:
             return
 
         self._notify(
+            "saturation",
             f"The dimmer has been at {self.max_output:.0f}% for "
             f"{int(elapsed / 60)} minutes and the enclosure is still {error:.1f} "
             "below setpoint. Check the bulb, the fixture and the enclosure."
@@ -493,18 +557,22 @@ class DimmerThermostatController:
         self.status = status
         self.status_detail = detail[:255]
 
-    def _notify(self, message: str) -> None:
-        """Raise a persistent notification, throttled per config entry."""
+    def _notify(self, kind: str, message: str) -> None:
+        """Raise a persistent notification, throttled per entry and per kind.
+
+        Throttling per kind means a nagging warning, such as a backup sensor
+        that has dropped out, can never hold back an over-temperature alert.
+        """
         now = time.monotonic()
-        last = self._last_notify_monotonic
+        last = self._last_notify_monotonic.get(kind)
         if last is not None and now - last < NOTIFY_THROTTLE_SECONDS:
             return
-        self._last_notify_monotonic = now
+        self._last_notify_monotonic[kind] = now
         async_create_notification(
             self.hass,
             message,
             title=f"{self.entry.title}",
-            notification_id=f"dimmer_thermostat_{self.entry.entry_id}",
+            notification_id=f"dimmer_thermostat_{self.entry.entry_id}_{kind}",
         )
 
 

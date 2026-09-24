@@ -17,6 +17,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_BACKUP_SENSOR,
     CONF_CYCLE_SECONDS,
     CONF_DIMMER,
     CONF_KP,
@@ -75,6 +76,7 @@ STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME, default="Vivarium heat"): selector.TextSelector(),
         vol.Required(CONF_SENSOR): _entity("sensor", device_class="temperature"),
+        vol.Optional(CONF_BACKUP_SENSOR): _entity("sensor", device_class="temperature"),
         vol.Required(CONF_DIMMER): _entity(list(SUPPORTED_DIMMER_DOMAINS)),
         vol.Required(CONF_TARGET_TEMP, default=DEFAULTS[CONF_TARGET_TEMP]): _number(
             0, 100, 0.5
@@ -143,9 +145,27 @@ def _dimmer_error(hass, dimmer_entity_id: str) -> str | None:
     return None
 
 
+def _backup_sensor_error(hass, user_input: dict[str, Any]) -> str | None:
+    """Return an error key if the backup sensor cannot stand in for the primary."""
+    backup = user_input.get(CONF_BACKUP_SENSOR)
+    if not backup:
+        return None
+    if backup == user_input[CONF_SENSOR]:
+        return "same_sensor"
+    # Gains and limits are in the primary sensor's unit, so the backup must match.
+    if _resolve_temperature_unit(hass, backup) != _resolve_temperature_unit(
+        hass, user_input[CONF_SENSOR]
+    ):
+        return "unit_mismatch"
+    return None
+
+
 def _validate_user_input(hass, user_input: dict[str, Any]) -> dict[str, str]:
     """Check the entity choices, returning a field-keyed error dict."""
     errors: dict[str, str] = {}
+    backup_error = _backup_sensor_error(hass, user_input)
+    if backup_error:
+        errors[CONF_BACKUP_SENSOR] = backup_error
     dimmer_error = _dimmer_error(hass, user_input[CONF_DIMMER])
     if dimmer_error:
         errors[CONF_DIMMER] = dimmer_error
@@ -154,7 +174,7 @@ def _validate_user_input(hass, user_input: dict[str, Any]) -> dict[str, str]:
 
 def _entry_data(hass, user_input: dict[str, Any]) -> dict[str, Any]:
     """Build the config entry data, capturing the sensor's temperature unit."""
-    return {
+    data = {
         CONF_NAME: user_input[CONF_NAME],
         CONF_SENSOR: user_input[CONF_SENSOR],
         CONF_DIMMER: user_input[CONF_DIMMER],
@@ -162,6 +182,9 @@ def _entry_data(hass, user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_MAX_OUTPUT: float(user_input[CONF_MAX_OUTPUT]),
         CONF_TEMP_UNIT: _resolve_temperature_unit(hass, user_input[CONF_SENSOR]),
     }
+    if user_input.get(CONF_BACKUP_SENSOR):
+        data[CONF_BACKUP_SENSOR] = user_input[CONF_BACKUP_SENSOR]
+    return data
 
 
 # -- config flow ---------------------------------------------------------------
@@ -194,7 +217,7 @@ class DimmerThermostatConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Change the sensor or the dimmer of an existing thermostat."""
+        """Change the sensors or the dimmer of an existing thermostat."""
         entry = self._get_reconfigure_entry()
         if user_input is None:
             return self.async_show_form(

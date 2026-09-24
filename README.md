@@ -59,11 +59,12 @@ directory and restart Home Assistant.
 
 ## Setup
 
-The add-integration form asks for four things:
+The add-integration form asks for four things, plus an optional backup sensor:
 
 | Field | Notes |
 | --- | --- |
 | Temperature sensor | Any `sensor` with device class `temperature` |
+| Backup temperature sensor | Optional. A second temperature sensor in the same space (see below) |
 | Dimmer | A dimmable `light`, or a `number` / `input_number` |
 | Target temperature | Changeable later from the thermostat card |
 | Maximum output | The controller never commands more than this |
@@ -71,6 +72,23 @@ The add-integration form asks for four things:
 You get a device with a `climate` entity (standard thermostat card, schedules,
 voice, everything), plus three sensors: output %, the PI integral, and a
 controller status string.
+
+### Backup temperature sensor
+
+With a backup sensor set, the thermostat controls on **whichever of the two
+reads higher**. That means either sensor can trip the over-temperature cut: if
+the lamp is heating one spot much more than the other, the hotter reading wins.
+
+If one sensor becomes unavailable, stale, non-numeric or reads implausibly
+**low**, it is ignored and the other carries on alone. The controller status
+becomes `degraded` and you get a notification. Only when both have failed does
+the thermostat fall back to minimum output. A reading implausibly **high** is
+never ignored, because it could be a real overheat rather than a broken probe:
+it cuts the heat, just as it would with one sensor. The thermostat's
+`temperature_source` attribute shows which sensor is in control.
+
+Both sensors must report in the same unit. Add or remove the backup later under
+**Reconfigure**.
 
 Tuning lives in **Configure** on the integration entry, grouped into
 Regulation, Limits and Safety. Changing the sensor or the dimmer later is under
@@ -104,8 +122,10 @@ error after a 6 °C drop in ambient. Your enclosure is not that model — tune i
 The integration's own guards are **soft** ones:
 
 - Sensor unavailable, non-numeric, stale or implausible → output drops to the
-  configured minimum, with a notification.
-- Measured temperature above setpoint + margin → dimmer cut outright.
+  configured minimum, with a notification. With a backup sensor, this happens
+  only when both have failed or either reads implausibly high.
+- Measured temperature (the higher of the two sensors, with a backup) above
+  setpoint + margin → dimmer cut outright.
 - Dimmer at maximum for a long stretch while still too cold → notification,
   because that usually means a dead bulb.
 - Unloading, reloading or removing the integration parks the dimmer, so removing
