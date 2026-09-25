@@ -9,7 +9,7 @@ from homeassistant.const import Platform
 DOMAIN: Final = "dimmer_thermostat"
 PLATFORMS: Final = [Platform.CLIMATE, Platform.SENSOR]
 
-MANUFACTURER: Final = "Dimmer Thermostat"
+MANUFACTURER: Final = "geirskogul"
 MODEL: Final = "PI proportional heater"
 
 # --- Config entry data keys (set at creation, changed via reconfigure) ---------
