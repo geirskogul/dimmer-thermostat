@@ -10,12 +10,15 @@ amplify quantisation noise far more than it would damp anything.
 
 Safety
 ------
-Every path through `async_control` either commands the dimmer or fails safe. The
-failsafe level is the configured minimum output (0 by default), because for a
-live animal an enclosure that is too cold is survivable for far longer than one
-that is too hot. This is still only a soft failsafe: it cannot help if the
-wireless link (Zigbee, Wi-Fi, ...) drops while the dimmer is holding a level. Keep an independent hardware
-over-temperature cutoff in the circuit.
+Every path through `async_control` either commands the dimmer or fails safe.
+Failing safe means switching the heat fully off, whatever the minimum output is
+set to, because for a live animal an enclosure that is too cold is survivable
+for far longer than one that is too hot. The dimmer itself is checked too: a
+dimmer that is missing, unavailable or rejects a command raises a notification
+rather than being assumed to have obeyed. This is still only a soft failsafe: it
+cannot help if the wireless link (Zigbee, Wi-Fi, ...) drops while the dimmer is
+holding a level. Keep an independent hardware over-temperature cutoff in the
+circuit.
 """
 
 from __future__ import annotations
@@ -23,14 +26,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from homeassistant.components.climate import HVACAction, HVACMode
 from homeassistant.components.light import ATTR_BRIGHTNESS_PCT
 from homeassistant.components.persistent_notification import (
     async_create as async_create_notification,
+    async_dismiss as async_dismiss_notification,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -40,15 +44,24 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
+from homeassistant.core import (
+    CoreState,
+    Event,
+    EventStateChangedData,
+    HomeAssistant,
+    State,
+    callback,
+)
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
 )
+from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ACTUATOR_TIMEOUT_SECONDS,
     ATTR_INTEGRAL,
     CONF_BACKUP_SENSOR,
     CONF_CYCLE_SECONDS,
@@ -57,6 +70,7 @@ from .const import (
     CONF_MAX_OUTPUT,
     CONF_MIN_OUTPUT,
     CONF_OVERTEMP_MARGIN,
+    CONF_QUIET_SENSORS,
     CONF_RESEND_SECONDS,
     CONF_SATURATION_ALERT,
     CONF_SEND_DEADBAND,
@@ -67,27 +81,38 @@ from .const import (
     CONF_TEMP_MAX_VALID,
     CONF_TEMP_MIN_VALID,
     CONF_TI_MINUTES,
-    CONF_QUIET_SENSORS,
-    DEFAULTS,
     HEARTBEAT_SECONDS,
     LIGHT_DOMAIN,
+    NOTIFY_DIMMER,
+    NOTIFY_FAILSAFE,
+    NOTIFY_OVERTEMP,
+    NOTIFY_SATURATION,
+    NOTIFY_SENSOR,
     NOTIFY_THROTTLE_SECONDS,
     NUMBER_DOMAINS,
     QUIET_AUTO,
     QUIET_HEARTBEAT,
     QUIET_TIMEOUT,
     QUIET_TRUST,
+    STARTUP_GRACE_SECONDS,
     STATUS_DEGRADED,
     STATUS_FAILSAFE,
     STATUS_OFF,
     STATUS_OK,
     STATUS_OVERTEMP,
     STATUS_STARTING,
+    entry_setting,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 _INVALID_STATES = (None, "", STATE_UNKNOWN, STATE_UNAVAILABLE)
+
+# Keys of the extra data saved with the climate entity's state. It is stored
+# even while the entity is unavailable, unlike the state's own attributes.
+RESTORE_HVAC_MODE = "hvac_mode"
+RESTORE_TARGET = "target_temperature"
+RESTORE_INTEGRAL = "integral"
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -124,23 +149,29 @@ class DimmerThermostatController:
         self._unsubscribers: list[Callable[[], None]] = []
         self._lock = asyncio.Lock()
         self._started = False
+        # Monotonic time when the startup grace ends; None while HA is starting.
+        self._grace_until: float | None = None
 
         self._last_step_monotonic: float | None = None
         self._last_send_monotonic: float | None = None
         self._last_sent_output: float | None = None
         self._saturated_since: float | None = None
         self._last_notify_monotonic: dict[str, float] = {}
+        # Assume the self-clearing kinds may be showing, left by the controller
+        # this one replaced on a reload, so the first good pass clears them.
+        self._active_notifications: set[str] = {
+            NOTIFY_FAILSAFE,
+            NOTIFY_SENSOR,
+            NOTIFY_DIMMER,
+        }
         self._sensor_problems: list[str] = []
+        self._dimmer_problem: str | None = None
 
     # -- configuration access -------------------------------------------------
 
     def _opt(self, key: str) -> float:
-        """Read a tunable, preferring options over entry data over the default."""
-        if key in self.entry.options:
-            return float(self.entry.options[key])
-        if key in self.entry.data:
-            return float(self.entry.data[key])
-        return float(DEFAULTS[key])
+        """Read a numeric tunable."""
+        return float(entry_setting(self.entry.options, self.entry.data, key))
 
     @property
     def sensor_entity_ids(self) -> list[str]:
@@ -158,7 +189,7 @@ class DimmerThermostatController:
 
     @property
     def min_output(self) -> float:
-        """Lowest percentage the controller will command."""
+        """Lowest percentage the controller will command while regulating."""
         return self._opt(CONF_MIN_OUTPUT)
 
     @property
@@ -193,10 +224,18 @@ class DimmerThermostatController:
     # -- lifecycle ------------------------------------------------------------
 
     async def async_start(self) -> None:
-        """Begin controlling: subscribe to the sensor, start the tick, run once."""
+        """Begin controlling: subscribe to the sensors and dimmer, tick, run once."""
         if self._started:
             return
         self._started = True
+
+        if self.hass.state is CoreState.running:
+            # A reload: everything this depends on is already up.
+            self._grace_until = time.monotonic()
+        else:
+            self._unsubscribers.append(
+                async_at_started(self.hass, self._async_hass_started)
+            )
 
         cycle = timedelta(seconds=int(self._opt(CONF_CYCLE_SECONDS)))
         self._unsubscribers.append(
@@ -207,20 +246,37 @@ class DimmerThermostatController:
                 self.hass, self.sensor_entity_ids, self._async_sensor_event
             )
         )
+        self._unsubscribers.append(
+            async_track_state_change_event(
+                self.hass, [self.dimmer_entity_id], self._async_dimmer_event
+            )
+        )
         await self.async_control()
 
     async def async_stop(self) -> None:
-        """Stop the loop and park the dimmer at the failsafe level.
+        """Stop the loop and switch the heat off.
 
-        Unload happens on reload, reconfiguration and removal alike. Parking the
-        lamp costs a brief dip in temperature on a reload, which a thermal system
-        will not notice, and it means removing the integration can never leave a
-        heat lamp stranded at a fixed brightness with nothing watching it.
+        Unload happens on reload, reconfiguration and removal alike. Switching
+        the lamp off costs a brief dip in temperature on a reload, which a
+        thermal system will not notice, and it means removing the integration
+        can never leave a heat lamp stranded at a fixed brightness with nothing
+        watching it. Taking the lock means a control pass already under way
+        finishes first, so it cannot turn the lamp back on afterwards.
         """
-        self._started = False
-        while self._unsubscribers:
-            self._unsubscribers.pop()()
-        await self._async_drive_dimmer(self.min_output, force=True)
+        async with self._lock:
+            self._started = False
+            while self._unsubscribers:
+                self._unsubscribers.pop()()
+            await self._async_cut_dimmer()
+
+    @callback
+    def _async_hass_started(self, hass: HomeAssistant) -> None:
+        """Home Assistant has finished starting: begin the grace period."""
+        self._grace_until = time.monotonic() + STARTUP_GRACE_SECONDS
+
+    def _in_startup_grace(self) -> bool:
+        """True while other integrations may still be bringing entities up."""
+        return self._grace_until is None or time.monotonic() < self._grace_until
 
     # -- triggers -------------------------------------------------------------
 
@@ -232,15 +288,27 @@ class DimmerThermostatController:
         """React immediately to a fresh report from either sensor."""
         await self.async_control()
 
+    async def _async_dimmer_event(self, event: Event[EventStateChangedData]) -> None:
+        """Re-send the level when the dimmer comes back after dropping out.
+
+        A dimmer that lost power or its radio link may come back at full
+        brightness or at whatever level it last held, so the level it is told
+        to hold must not be assumed to still apply.
+        """
+        new_state = event.data["new_state"]
+        old_state = event.data["old_state"]
+        if new_state is None or new_state.state == STATE_UNAVAILABLE:
+            return
+        if old_state is not None and old_state.state != STATE_UNAVAILABLE:
+            return
+        self._last_sent_output = None
+        await self.async_control()
+
     # -- commands from the climate entity -------------------------------------
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Switch between heating and off, acting on the dimmer straight away."""
         self.hvac_mode = hvac_mode
-        if hvac_mode == HVACMode.OFF:
-            self.integral = self._opt(CONF_STARTUP_OUTPUT)
-            await self._async_shutdown("turned off")
-            return
         await self.async_control()
 
     async def async_set_target_temperature(self, temperature: float) -> None:
@@ -254,27 +322,56 @@ class DimmerThermostatController:
         self.integral = default if preload is None else float(preload)
         await self.async_control()
 
-    def async_restore(self, last_state: State | None) -> None:
-        """Adopt the mode, setpoint and integral recorded before a restart."""
-        if last_state is None:
+    def async_restore(
+        self, last_state: State | None, extra: Mapping[str, Any] | None
+    ) -> None:
+        """Adopt the mode, setpoint and integral recorded before a restart.
+
+        The extra data is saved whatever the entity's state. The state's own
+        attributes are only a fallback, for a first start after upgrading from
+        a version that did not save extra data, and are missing whenever the
+        entity was unavailable.
+        """
+        if extra:
+            values = (
+                extra.get(RESTORE_HVAC_MODE),
+                extra.get(RESTORE_TARGET),
+                extra.get(RESTORE_INTEGRAL),
+            )
+        elif last_state is not None:
+            values = (
+                last_state.state,
+                last_state.attributes.get("temperature"),
+                last_state.attributes.get(ATTR_INTEGRAL),
+            )
+        else:
             return
-        _restore_mode(self, last_state)
-        _restore_target(self, last_state)
-        _restore_integral(self, last_state)
+        _restore_mode(self, values[0])
+        _restore_target(self, values[1])
+        _restore_integral(self, values[2])
+
+    def restore_data(self) -> dict[str, Any]:
+        """What to save so a restart resumes where this left off."""
+        return {
+            RESTORE_HVAC_MODE: str(self.hvac_mode),
+            RESTORE_TARGET: self.target_temperature,
+            RESTORE_INTEGRAL: self.integral,
+        }
 
     # -- the control step -----------------------------------------------------
 
     async def async_control(self) -> None:
         """Run one full control pass. Serialised so triggers cannot overlap."""
         async with self._lock:
+            if not self._started:
+                return
             await self._async_control_locked()
         self._async_notify_listeners()
 
     async def _async_control_locked(self) -> None:
         """Body of the control pass; the caller holds the lock."""
         if self.hvac_mode == HVACMode.OFF:
-            self._read_temperature_quietly()
-            await self._async_shutdown("thermostat off")
+            await self._async_off()
             return
 
         temperature = await self._async_validated_temperature()
@@ -283,6 +380,19 @@ class DimmerThermostatController:
 
         self.current_temperature = temperature
         await self._async_regulate(temperature)
+
+    async def _async_off(self) -> None:
+        """Switched off: keep the lamp off and track the temperature for display."""
+        self.integral = self._opt(CONF_STARTUP_OUTPUT)
+        self._sensor_problems = []
+        self._saturated_since = None
+        self._read_temperature_quietly()
+        await self._async_cut_dimmer()
+        self._dismiss(NOTIFY_FAILSAFE, NOTIFY_SENSOR)
+        detail = "thermostat off"
+        if self._dimmer_problem:
+            detail = f"{detail}; {self._dimmer_problem}"
+        self._set_status(STATUS_OFF, detail)
 
     def _read_temperature_quietly(self) -> None:
         """Track the sensors while switched off, without guards or failsafes.
@@ -310,6 +420,7 @@ class DimmerThermostatController:
             await self._async_handle_overtemp(temperature)
             return
 
+        self._dismiss(NOTIFY_FAILSAFE)
         output = self._compute_output(temperature, self._step_interval())
         await self._async_drive_dimmer(output)
         self._track_saturation(output, self.target_temperature - temperature)
@@ -318,10 +429,11 @@ class DimmerThermostatController:
             f"target={self.target_temperature:.2f} "
             f"out={output:.1f}% i={self.integral:.1f}%"
         )
-        if self._sensor_problems:
-            self._set_status(
-                STATUS_DEGRADED, f"{detail}; {'; '.join(self._sensor_problems)}"
-            )
+        problems = list(self._sensor_problems)
+        if self._dimmer_problem:
+            problems.append(self._dimmer_problem)
+        if problems:
+            self._set_status(STATUS_DEGRADED, f"{detail}; {'; '.join(problems)}")
             return
         self._set_status(STATUS_OK, detail)
 
@@ -348,8 +460,7 @@ class DimmerThermostatController:
                 self.max_output,
             )
 
-        self.output = _clamp(proportional + self.integral, self.min_output, self.max_output)
-        return self.output
+        return _clamp(proportional + self.integral, self.min_output, self.max_output)
 
     def _is_winding_up(self, unclamped_output: float, error: float) -> bool:
         """True when integrating further would only drive deeper into a stop.
@@ -402,10 +513,12 @@ class DimmerThermostatController:
             return None
 
         self.temperature_source = max(readings, key=readings.__getitem__)
-        if problems:
+        if not problems:
+            self._dismiss(NOTIFY_SENSOR)
+        elif not self._in_startup_grace():
             reason = "; ".join(problems)
             self._notify(
-                "sensor",
+                NOTIFY_SENSOR,
                 f"Running on {self.temperature_source} alone -- {reason}",
             )
             _LOGGER.warning("%s: sensor degraded, %s", self.entry.title, reason)
@@ -452,7 +565,7 @@ class DimmerThermostatController:
 
     def _quiet_mode(self, entity_id: str) -> str:
         """How a quiet spell from this sensor is judged, resolving "auto"."""
-        mode = self.entry.options.get(CONF_QUIET_SENSORS, DEFAULTS[CONF_QUIET_SENSORS])
+        mode = entry_setting(self.entry.options, self.entry.data, CONF_QUIET_SENSORS)
         if mode != QUIET_AUTO:
             return mode
         entry = er.async_get(self.hass).async_get(entity_id)
@@ -485,32 +598,47 @@ class DimmerThermostatController:
         return min(known) if known else None
 
     async def _async_fail_safe(self, reason: str) -> None:
-        """Park the dimmer, reset the integral and raise a notification."""
-        await self._async_drive_dimmer(self.min_output, force=True)
-        self.integral = self._opt(CONF_STARTUP_OUTPUT)
-        self._set_status(STATUS_FAILSAFE, reason)
-        self._notify("failsafe", f"Heating dropped to {self.min_output:.0f}% -- {reason}")
-        _LOGGER.warning("%s: failsafe, %s", self.entry.title, reason)
+        """Switch the heat off, reset the integral and raise a notification.
 
-    async def _async_shutdown(self, reason: str) -> None:
-        """Quiet stop requested by the user; no notification is warranted."""
-        await self._async_drive_dimmer(self.min_output, force=True)
-        self._set_status(STATUS_OFF, reason)
+        In the grace period after Home Assistant starts, the sensors may simply
+        not have appeared yet: the heat still goes off, but quietly.
+        """
+        switched_off = await self._async_cut_dimmer()
+        self.integral = self._opt(CONF_STARTUP_OUTPUT)
+        self._saturated_since = None
+        if self._in_startup_grace():
+            self._set_status(STATUS_STARTING, f"waiting for sensors: {reason}")
+            _LOGGER.debug("%s: waiting for sensors, %s", self.entry.title, reason)
+            return
+        self._set_status(STATUS_FAILSAFE, reason)
+        if switched_off:
+            outcome = "Heating switched off"
+        else:
+            outcome = f"Heating could NOT be switched off ({self._dimmer_problem})"
+        self._notify(NOTIFY_FAILSAFE, f"{outcome} -- {reason}")
+        _LOGGER.warning("%s: failsafe, %s", self.entry.title, reason)
 
     async def _async_handle_overtemp(self, temperature: float) -> None:
         """Hard cut above the over-temperature margin, bypassing the deadband."""
         self.integral = self.min_output
-        await self._async_drive_dimmer(self.min_output, force=True)
+        self._saturated_since = None
+        switched_off = await self._async_cut_dimmer()
         self._set_status(
             STATUS_OVERTEMP,
             f"temp={temperature:.2f} ({self.temperature_source}) "
             f"target={self.target_temperature:.2f}",
         )
+        if switched_off:
+            outcome = "The heat has been switched off."
+        else:
+            outcome = (
+                f"The heat could NOT be switched off: {self._dimmer_problem}. "
+                "Check the lamp now."
+            )
         self._notify(
-            "overtemp",
+            NOTIFY_OVERTEMP,
             f"Over temperature: {self.temperature_source} reads {temperature:.1f} "
-            f"against a setpoint of {self.target_temperature:.1f}. "
-            "The dimmer has been cut.",
+            f"against a setpoint of {self.target_temperature:.1f}. {outcome}",
         )
 
     def _track_saturation(self, output: float, error: float) -> None:
@@ -529,7 +657,7 @@ class DimmerThermostatController:
             return
 
         self._notify(
-            "saturation",
+            NOTIFY_SATURATION,
             f"The dimmer has been at {self.max_output:.0f}% for "
             f"{int(elapsed / 60)} minutes and the enclosure is still {error:.1f} "
             "below setpoint. Check the bulb, the fixture and the enclosure."
@@ -537,16 +665,80 @@ class DimmerThermostatController:
 
     # -- actuation ------------------------------------------------------------
 
-    async def _async_drive_dimmer(self, output: float, force: bool = False) -> None:
-        """Command the dimmer, subject to the send deadband unless forced."""
+    async def _async_drive_dimmer(self, output: float) -> bool:
+        """Command a regulating level, within the output limits and deadband."""
         output = _clamp(output, self.min_output, self.max_output)
-        self.output = output
-        if not force and not self._needs_send(output):
-            return
+        return await self._async_send(output, force=False)
 
-        self._last_send_monotonic = time.monotonic()
-        self._last_sent_output = output
-        await self._async_call_actuator(output)
+    async def _async_cut_dimmer(self) -> bool:
+        """Switch the heat fully off, whatever the minimum output is set to."""
+        return await self._async_send(0.0, force=True)
+
+    async def _async_send(self, output: float, force: bool) -> bool:
+        """Command the dimmer unless the deadband says not to bother.
+
+        Returns False only when the dimmer could not be reached. The dimmer's
+        presence is checked on every pass, sent or not, so a dimmer that has
+        dropped out is reported even while the level is steady. A failed send
+        is not recorded as sent, so the next pass tries again.
+        """
+        self.output = output
+        problem = self._dimmer_absence()
+        if problem is None:
+            if not force and not self._needs_send(output):
+                self._dimmer_ok()
+                return True
+            problem = await self._async_try_actuator(output)
+        if problem is None:
+            self._last_send_monotonic = time.monotonic()
+            self._last_sent_output = output
+            self._dimmer_ok()
+            return True
+
+        self._last_sent_output = None
+        self._dimmer_problem = problem
+        if not self._in_startup_grace():
+            self._notify(
+                NOTIFY_DIMMER,
+                f"{problem[0].upper()}{problem[1:]}. The thermostat cannot set "
+                "the heat level until the dimmer responds again.",
+            )
+            _LOGGER.warning("%s: %s", self.entry.title, problem)
+        return False
+
+    def _dimmer_ok(self) -> None:
+        """The dimmer is reachable: clear any earlier problem."""
+        self._dimmer_problem = None
+        self._dismiss(NOTIFY_DIMMER)
+
+    def _dimmer_absence(self) -> str | None:
+        """Why the dimmer cannot be commanded at all, if it cannot.
+
+        Home Assistant silently skips service calls to an entity that is
+        missing or unavailable, so this has to be checked first.
+        """
+        entity_id = self.dimmer_entity_id
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return f"the dimmer {entity_id} does not exist (renamed or removed?)"
+        if state.state == STATE_UNAVAILABLE:
+            return f"the dimmer {entity_id} is unavailable"
+        return None
+
+    async def _async_try_actuator(self, output: float) -> str | None:
+        """Send one command, returning why it failed rather than raising."""
+        entity_id = self.dimmer_entity_id
+        try:
+            async with asyncio.timeout(ACTUATOR_TIMEOUT_SECONDS):
+                await self._async_call_actuator(output)
+        except TimeoutError:
+            return (
+                f"the dimmer {entity_id} did not respond within "
+                f"{ACTUATOR_TIMEOUT_SECONDS} s"
+            )
+        except Exception as err:  # noqa: BLE001 -- the loop must outlive any dimmer error
+            return f"the dimmer {entity_id} rejected the command: {err or type(err).__name__}"
+        return None
 
     def _needs_send(self, output: float) -> bool:
         """True when the level moved enough, or the keep-alive resend is due."""
@@ -567,7 +759,7 @@ class DimmerThermostatController:
         elif domain in NUMBER_DOMAINS:
             await self._async_call_number(domain, entity_id, output)
         else:
-            _LOGGER.error("%s: %s is not a supported dimmer", self.entry.title, entity_id)
+            raise ValueError(f"{domain} entities are not supported as a dimmer")
 
     async def _async_call_light(self, entity_id: str, output: float) -> None:
         """Drive a light entity with brightness_pct, turning it off at zero."""
@@ -603,6 +795,10 @@ class DimmerThermostatController:
         self.status = status
         self.status_detail = detail[:255]
 
+    def _notification_id(self, kind: str) -> str:
+        """One notification per entry and kind, so a repeat replaces the last."""
+        return f"dimmer_thermostat_{self.entry.entry_id}_{kind}"
+
     def _notify(self, kind: str, message: str) -> None:
         """Raise a persistent notification, throttled per entry and per kind.
 
@@ -614,26 +810,39 @@ class DimmerThermostatController:
         if last is not None and now - last < NOTIFY_THROTTLE_SECONDS:
             return
         self._last_notify_monotonic[kind] = now
+        self._active_notifications.add(kind)
         async_create_notification(
             self.hass,
             message,
             title=f"{self.entry.title}",
-            notification_id=f"dimmer_thermostat_{self.entry.entry_id}_{kind}",
+            notification_id=self._notification_id(kind),
         )
+
+    def _dismiss(self, *kinds: str) -> None:
+        """Withdraw notifications whose problem has cleared.
+
+        The throttle is forgotten too, so if the problem comes back it is
+        reported straight away rather than up to half an hour later.
+        """
+        for kind in kinds:
+            if kind not in self._active_notifications:
+                continue
+            self._active_notifications.discard(kind)
+            self._last_notify_monotonic.pop(kind, None)
+            async_dismiss_notification(self.hass, self._notification_id(kind))
 
 
 # -- restore helpers, kept out of the class to keep async_restore flat ---------
 
 
-def _restore_mode(controller: DimmerThermostatController, last_state: State) -> None:
+def _restore_mode(controller: DimmerThermostatController, stored: Any) -> None:
     """Restore the HVAC mode recorded before the restart."""
-    if last_state.state in (HVACMode.HEAT, HVACMode.OFF):
-        controller.hvac_mode = HVACMode(last_state.state)
+    if stored in (HVACMode.HEAT, HVACMode.OFF):
+        controller.hvac_mode = HVACMode(stored)
 
 
-def _restore_target(controller: DimmerThermostatController, last_state: State) -> None:
+def _restore_target(controller: DimmerThermostatController, stored: Any) -> None:
     """Restore the setpoint recorded before the restart."""
-    stored = last_state.attributes.get("temperature")
     if stored is None:
         return
     try:
@@ -642,9 +851,8 @@ def _restore_target(controller: DimmerThermostatController, last_state: State) -
         _LOGGER.debug("Ignoring unreadable restored setpoint %r", stored)
 
 
-def _restore_integral(controller: DimmerThermostatController, last_state: State) -> None:
+def _restore_integral(controller: DimmerThermostatController, stored: Any) -> None:
     """Restore the integral term so a restart does not undo hours of settling."""
-    stored = last_state.attributes.get(ATTR_INTEGRAL)
     if stored is None:
         return
     try:

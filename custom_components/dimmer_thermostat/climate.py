@@ -14,7 +14,11 @@ from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.restore_state import (
+    ExtraStoredData,
+    RestoredExtraData,
+    RestoreEntity,
+)
 
 from . import DimmerThermostatConfigEntry
 from .const import (
@@ -27,8 +31,9 @@ from .const import (
     CONF_MIN_TEMP,
     CONF_PRECISION,
     CONF_TEMP_UNIT,
-    DEFAULTS,
+    entry_setting,
 )
+from .controller import DimmerThermostatController
 from .entity import DimmerThermostatEntity
 
 SERVICE_RESET_INTEGRAL = "reset_integral"
@@ -62,7 +67,11 @@ class DimmerThermostat(DimmerThermostatEntity, ClimateEntity, RestoreEntity):
     )
     _enable_turn_on_off_backwards_compatibility = False
 
-    def __init__(self, controller, entry: DimmerThermostatConfigEntry) -> None:
+    def __init__(
+        self,
+        controller: DimmerThermostatController,
+        entry: DimmerThermostatConfigEntry,
+    ) -> None:
         """Read the display limits and unit fixed at configuration time."""
         super().__init__(controller, entry)
         self._attr_unique_id = entry.entry_id
@@ -74,8 +83,16 @@ class DimmerThermostat(DimmerThermostatEntity, ClimateEntity, RestoreEntity):
     async def async_added_to_hass(self) -> None:
         """Restore the previous mode, setpoint and integral, then start the loop."""
         await super().async_added_to_hass()
-        self._controller.async_restore(await self.async_get_last_state())
+        extra = await self.async_get_last_extra_data()
+        self._controller.async_restore(
+            await self.async_get_last_state(), extra.as_dict() if extra else None
+        )
         await self._controller.async_start()
+
+    @property
+    def extra_restore_state_data(self) -> ExtraStoredData:
+        """Mode, setpoint and integral, saved even while the entity is unavailable."""
+        return RestoredExtraData(self._controller.restore_data())
 
     # -- state ----------------------------------------------------------------
 
@@ -106,7 +123,7 @@ class DimmerThermostat(DimmerThermostatEntity, ClimateEntity, RestoreEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, float | str | None]:
-        """Expose the controller internals, which also makes them restorable."""
+        """Expose the controller internals for charts and automations."""
         controller = self._controller
         return {
             ATTR_INTEGRAL: round(controller.integral, 3),
@@ -143,12 +160,8 @@ class DimmerThermostat(DimmerThermostatEntity, ClimateEntity, RestoreEntity):
 
 
 def _tunable(entry: DimmerThermostatConfigEntry, key: str) -> float:
-    """Read a display tunable, preferring options over data over the default."""
-    if key in entry.options:
-        return float(entry.options[key])
-    if key in entry.data:
-        return float(entry.data[key])
-    return float(DEFAULTS[key])
+    """Read a display tunable."""
+    return float(entry_setting(entry.options, entry.data, key))
 
 
 def _temperature_unit(entry: DimmerThermostatConfigEntry) -> UnitOfTemperature:

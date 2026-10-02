@@ -11,6 +11,7 @@ from homeassistant.config_entries import (
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
+    OptionsFlowWithReload,
 )
 from homeassistant.const import CONF_NAME, UnitOfTemperature
 from homeassistant.core import callback
@@ -44,6 +45,7 @@ from .const import (
     LIGHT_DOMAIN,
     QUIET_MODES,
     SUPPORTED_DIMMER_DOMAINS,
+    entry_setting,
 )
 
 
@@ -74,12 +76,21 @@ def _entity(domain: str | list[str], device_class: str | None = None):
 
 # -- schemas -------------------------------------------------------------------
 
+ENTITY_FIELDS = {
+    vol.Required(CONF_NAME, default="Vivarium heat"): selector.TextSelector(),
+    vol.Required(CONF_SENSOR): _entity("sensor", device_class="temperature"),
+    vol.Optional(CONF_BACKUP_SENSOR): _entity("sensor", device_class="temperature"),
+    vol.Required(CONF_DIMMER): _entity(list(SUPPORTED_DIMMER_DOMAINS)),
+}
+
+# Reconfigure only changes the entities. The setpoint and maximum output asked
+# for when adding are starting values; afterwards they live on the thermostat
+# card and in Configure.
+STEP_RECONFIGURE_SCHEMA = vol.Schema(ENTITY_FIELDS)
+
 STEP_USER_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_NAME, default="Vivarium heat"): selector.TextSelector(),
-        vol.Required(CONF_SENSOR): _entity("sensor", device_class="temperature"),
-        vol.Optional(CONF_BACKUP_SENSOR): _entity("sensor", device_class="temperature"),
-        vol.Required(CONF_DIMMER): _entity(list(SUPPORTED_DIMMER_DOMAINS)),
+        **ENTITY_FIELDS,
         vol.Required(CONF_TARGET_TEMP, default=DEFAULTS[CONF_TARGET_TEMP]): _number(
             0, 100, 0.5
         ),
@@ -122,6 +133,15 @@ SAFETY_KEYS = (
     (CONF_TEMP_MIN_VALID, _number(-50, 200, 0.5)),
     (CONF_TEMP_MAX_VALID, _number(-50, 200, 0.5)),
     (CONF_SATURATION_ALERT, _number(300, 21600, 60, "s")),
+)
+
+
+# Pairs of settings where the first must stay below the second, checked when a
+# group of tunables is saved: (low key, high key, error key).
+ORDERED_PAIRS = (
+    (CONF_MIN_OUTPUT, CONF_MAX_OUTPUT, "output_range"),
+    (CONF_MIN_TEMP, CONF_MAX_TEMP, "setpoint_range"),
+    (CONF_TEMP_MIN_VALID, CONF_TEMP_MAX_VALID, "plausible_range"),
 )
 
 
@@ -184,19 +204,41 @@ def _validate_user_input(hass, user_input: dict[str, Any]) -> dict[str, str]:
     return errors
 
 
-def _entry_data(hass, user_input: dict[str, Any]) -> dict[str, Any]:
-    """Build the config entry data, capturing the sensor's temperature unit."""
-    data = {
-        CONF_NAME: user_input[CONF_NAME],
-        CONF_SENSOR: user_input[CONF_SENSOR],
-        CONF_DIMMER: user_input[CONF_DIMMER],
-        CONF_TARGET_TEMP: float(user_input[CONF_TARGET_TEMP]),
-        CONF_MAX_OUTPUT: float(user_input[CONF_MAX_OUTPUT]),
-        CONF_TEMP_UNIT: _resolve_temperature_unit(hass, user_input[CONF_SENSOR]),
-    }
+def _entry_data(
+    hass, user_input: dict[str, Any], previous: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Build the config entry data, capturing the sensor's temperature unit.
+
+    On reconfigure, `previous` carries over the starting values the form no
+    longer asks for.
+    """
+    data = dict(previous or {})
+    data.pop(CONF_BACKUP_SENSOR, None)
+    data.update(
+        {
+            CONF_NAME: user_input[CONF_NAME],
+            CONF_SENSOR: user_input[CONF_SENSOR],
+            CONF_DIMMER: user_input[CONF_DIMMER],
+            CONF_TEMP_UNIT: _resolve_temperature_unit(hass, user_input[CONF_SENSOR]),
+        }
+    )
+    for key in (CONF_TARGET_TEMP, CONF_MAX_OUTPUT):
+        if key in user_input:
+            data[key] = float(user_input[key])
     if user_input.get(CONF_BACKUP_SENSOR):
         data[CONF_BACKUP_SENSOR] = user_input[CONF_BACKUP_SENSOR]
     return data
+
+
+def _range_errors(settings: dict[str, Any], keys: set[str]) -> dict[str, str]:
+    """Flag any low/high pair on this page that has been entered the wrong way round."""
+    errors: dict[str, str] = {}
+    for low_key, high_key, error in ORDERED_PAIRS:
+        if high_key not in keys:
+            continue
+        if float(settings[low_key]) >= float(settings[high_key]):
+            errors[high_key] = error
+    return errors
 
 
 # -- config flow ---------------------------------------------------------------
@@ -235,7 +277,7 @@ class DimmerThermostatConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id="reconfigure",
                 data_schema=self.add_suggested_values_to_schema(
-                    STEP_USER_SCHEMA, entry.data
+                    STEP_RECONFIGURE_SCHEMA, entry.data
                 ),
             )
 
@@ -244,7 +286,7 @@ class DimmerThermostatConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id="reconfigure",
                 data_schema=self.add_suggested_values_to_schema(
-                    STEP_USER_SCHEMA, user_input
+                    STEP_RECONFIGURE_SCHEMA, user_input
                 ),
                 errors=errors,
             )
@@ -252,7 +294,9 @@ class DimmerThermostatConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(user_input[CONF_DIMMER])
         self._abort_if_unique_id_mismatch()
         return self.async_update_reload_and_abort(
-            entry, title=user_input[CONF_NAME], data=_entry_data(self.hass, user_input)
+            entry,
+            title=user_input[CONF_NAME],
+            data=_entry_data(self.hass, user_input, dict(entry.data)),
         )
 
     @staticmethod
@@ -265,12 +309,11 @@ class DimmerThermostatConfigFlow(ConfigFlow, domain=DOMAIN):
 # -- options flow --------------------------------------------------------------
 
 
-class DimmerThermostatOptionsFlow(OptionsFlow):
-    """Tune an existing thermostat without recreating it."""
+class DimmerThermostatOptionsFlow(OptionsFlowWithReload):
+    """Tune an existing thermostat without recreating it.
 
-    def __init__(self) -> None:
-        """Collect edits across steps before writing them back in one go."""
-        self._collected: dict[str, Any] = {}
+    Saving reloads the entry so the new values take effect at once.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -312,13 +355,28 @@ class DimmerThermostatOptionsFlow(OptionsFlow):
                 step_id=step_id, data_schema=self._build_schema(keys)
             )
 
-        options = dict(self.config_entry.options)
+        entry = self.config_entry
+        options = dict(entry.options)
         options.update(
             {
                 key: value if isinstance(value, str) else float(value)
                 for key, value in user_input.items()
             }
         )
+        settings = {
+            key: entry_setting(options, entry.data, key)
+            for pair in ORDERED_PAIRS
+            for key in pair[:2]
+        }
+        errors = _range_errors(settings, {key for key, _ in keys})
+        if errors:
+            return self.async_show_form(
+                step_id=step_id,
+                data_schema=self.add_suggested_values_to_schema(
+                    self._build_schema(keys), user_input
+                ),
+                errors=errors,
+            )
         return self.async_create_entry(data=options)
 
     def _build_schema(self, keys: tuple[tuple[str, Any], ...]) -> vol.Schema:
@@ -331,10 +389,5 @@ class DimmerThermostatOptionsFlow(OptionsFlow):
     def _current(self, key: str) -> float | str:
         """The value in force for a tunable right now."""
         entry = self.config_entry
-        if key in entry.options:
-            value = entry.options[key]
-        elif key in entry.data:
-            value = entry.data[key]
-        else:
-            value = DEFAULTS[key]
+        value = entry_setting(entry.options, entry.data, key)
         return value if isinstance(value, str) else float(value)

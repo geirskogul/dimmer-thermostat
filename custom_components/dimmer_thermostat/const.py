@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Final
+from collections.abc import Mapping
+from typing import Any, Final
 
 from homeassistant.const import Platform
 
@@ -104,3 +105,30 @@ ATTR_STATUS_DETAIL: Final = "controller_status_detail"
 ATTR_TEMPERATURE_SOURCE: Final = "temperature_source"
 
 NOTIFY_THROTTLE_SECONDS: Final = 1800
+
+# A dimmer command that has not completed in this time counts as failed, so a
+# hung radio can never stall the control loop.
+ACTUATOR_TIMEOUT_SECONDS: Final = 15
+
+# After Home Assistant starts, sensors and dimmers from other integrations may
+# take a little while to appear. Failures in that window still cut the heat but
+# do not raise notifications.
+STARTUP_GRACE_SECONDS: Final = 120
+
+# Notification kinds, each throttled and dismissed on its own.
+NOTIFY_OVERTEMP: Final = "overtemp"
+NOTIFY_FAILSAFE: Final = "failsafe"
+NOTIFY_SENSOR: Final = "sensor"
+NOTIFY_SATURATION: Final = "saturation"
+NOTIFY_DIMMER: Final = "dimmer"
+
+
+def entry_setting(
+    options: Mapping[str, Any], data: Mapping[str, Any], key: str
+) -> Any:
+    """A setting's value in force: options over entry data over the default."""
+    if key in options:
+        return options[key]
+    if key in data:
+        return data[key]
+    return DEFAULTS[key]

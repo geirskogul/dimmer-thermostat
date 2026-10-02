@@ -21,14 +21,12 @@
       },
       "reconfigure": {
         "title": "Change sensors or dimmer",
-        "description": "Point this thermostat at different entities. Tuning is unaffected.",
+        "description": "Point this thermostat at different entities. Tuning, the setpoint and the output limits are unaffected.",
         "data": {
           "name": "Name",
           "temperature_sensor": "Temperature sensor",
           "backup_temperature_sensor": "Backup temperature sensor (optional)",
-          "dimmer_entity": "Dimmer",
-          "target_temp": "Target temperature",
-          "max_output": "Maximum output"
+          "dimmer_entity": "Dimmer"
         },
         "data_description": {
           "backup_temperature_sensor": "A second sensor in the same space. The thermostat controls on whichever sensor reads higher, either one can trip the over-temperature cut, and if one fails the other carries on."
@@ -87,7 +85,7 @@
           "precision": "Setpoint step"
         },
         "data_description": {
-          "min_output": "Also the level the thermostat falls back to when anything goes wrong."
+          "min_output": "The lowest level used while regulating. When anything goes wrong, or the thermostat is switched off, the heat is switched fully off regardless."
         }
       },
       "safety": {
@@ -108,13 +106,24 @@
           "saturation_alert_seconds": "How long the dimmer may sit at maximum while still too cold before you are warned about the bulb."
         }
       }
+    },
+    "error": {
+      "output_range": "Maximum output must be higher than minimum output.",
+      "setpoint_range": "The highest selectable setpoint must be higher than the lowest.",
+      "plausible_range": "The highest plausible reading must be higher than the lowest."
     }
   },
   "entity": {
     "sensor": {
-      "output": { "name": "Output" },
-      "integral": { "name": "PI integral" },
-      "status": { "name": "Controller status" }
+      "output": {
+        "name": "Output"
+      },
+      "integral": {
+        "name": "PI integral"
+      },
+      "status": {
+        "name": "Controller status"
+      }
     }
   },
   "services": {

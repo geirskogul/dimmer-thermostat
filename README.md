@@ -84,7 +84,7 @@ the lamp is heating one spot much more than the other, the hotter reading wins.
 If one sensor becomes unavailable, stale, non-numeric or reads implausibly
 **low**, it is ignored and the other carries on alone. The controller status
 becomes `degraded` and you get a notification. Only when both have failed does
-the thermostat fall back to minimum output. A reading implausibly **high** is
+the thermostat switch the heat off. A reading implausibly **high** is
 never ignored, because it could be a real overheat rather than a broken probe:
 it cuts the heat, just as it would with one sensor. The thermostat's
 `temperature_source` attribute shows which sensor is in control.
@@ -94,7 +94,8 @@ Both sensors must report in the same unit. Add or remove the backup later under
 
 Tuning lives in **Configure** on the integration entry, grouped into
 Regulation, Limits and Safety. Changing the sensor or the dimmer later is under
-**Reconfigure**.
+**Reconfigure**; the setpoint and output limits are not on that form, because
+they live on the thermostat card and under Configure.
 
 ## Tuning
 
@@ -123,16 +124,35 @@ error after a 6 °C drop in ambient. Your enclosure is not that model — tune i
 
 The integration's own guards are **soft** ones:
 
-- Sensor unavailable, non-numeric, stale or implausible → output drops to the
-  configured minimum, with a notification (how "stale" is judged depends
-  on the *Quiet sensors* setting). With a backup sensor, this happens
-  only when both have failed or either reads implausibly high.
+- Sensor unavailable, non-numeric, stale or implausible → heat switched off,
+  with a notification (how "stale" is judged depends on the *Quiet sensors*
+  setting). With a backup sensor, this happens only when both have failed or
+  either reads implausibly high.
 - Measured temperature (the higher of the two sensors, with a backup) above
-  setpoint + margin → dimmer cut outright.
+  setpoint + margin → heat switched off outright.
+- Every safety cut switches the heat **fully off**, even if *Minimum output* is
+  set above zero. Minimum output only applies while regulating normally.
+- The dimmer is checked too. Home Assistant silently skips commands to an
+  entity that is missing or unavailable, so a dimmer that drops off the
+  network, is renamed away, rejects a command or does not answer within 15
+  seconds raises a notification and shows as `degraded`, and the command is
+  retried on the next pass. When the dimmer comes back, its level is sent
+  again straight away, since a dimmer that lost power may return at full
+  brightness.
 - Dimmer at maximum for a long stretch while still too cold → notification,
   because that usually means a dead bulb.
-- Unloading, reloading or removing the integration parks the dimmer, so removing
-  it can never leave a lamp stranded at a fixed brightness with nothing watching.
+- Unloading, reloading or removing the integration switches the dimmer off, so
+  removing it can never leave a lamp stranded at a fixed brightness with nothing
+  watching.
+- Notifications clear themselves once the problem has gone (over-temperature
+  and dead-bulb alerts stay until you dismiss them).
+- For two minutes after Home Assistant starts, while other integrations bring
+  their sensors and dimmers up, a missing sensor or dimmer still keeps the heat
+  off but does not raise a notification. The controller status shows
+  `starting` meanwhile.
+- Renaming the sensor's or the dimmer's entity id is followed automatically.
+- Mode, setpoint and integral survive a restart, even one made while the
+  sensors were unavailable.
 
 **None of that helps if the wireless link (Zigbee, Wi-Fi, Z-Wave, ...) drops while the
 dimmer is holding a level.** The dimmer will happily sit at 70 % forever and Home Assistant is in no
@@ -208,7 +228,20 @@ fixture or the enclosure.
 
 ## Requirements
 
-Home Assistant 2025.2 or newer.
+Home Assistant 2025.8 or newer.
+
+## Development
+
+The tests use `pytest-homeassistant-custom-component`, which brings Home
+Assistant itself with it:
+
+```sh
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements_test.txt
+pytest
+```
+
+They run on every push, alongside hassfest and the HACS checks.
 
 ## Licence
 
