@@ -23,8 +23,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # Drop this once the integration is registered with home-assistant/brands.
-          ignore: brands
 
   tests:
     name: Tests
