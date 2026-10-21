@@ -47,12 +47,20 @@ staircase and amplify noise far more than it would damp anything.
 
 ## Installation
 
-### HACS
+### HACS (recommended)
+
+Dimmer Thermostat is in the HACS default list.
+
+1. HACS → search for **Dimmer Thermostat**
+2. Download it, then restart Home Assistant
+3. **Settings → Devices & services → + Add integration → Dimmer Thermostat**
+
+If it does not show up in the search (for example on an older HACS), add it as
+a custom repository instead:
 
 1. HACS → three-dot menu → **Custom repositories**
-2. Add this repository's URL, category **Integration**
-3. Install, then restart Home Assistant
-4. **Settings → Devices & services → + Add integration → Dimmer Thermostat**
+2. Add `https://github.com/geirskogul/dimmer-thermostat`, category **Integration**
+3. Download it, restart Home Assistant and add the integration as above
 
 ### Manual
 
